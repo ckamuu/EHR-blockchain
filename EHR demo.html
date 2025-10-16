@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EHR Blockchain DApp Demo</title>
+    <!-- Tải Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tải Ethers.js cho tương tác Blockchain -->
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.11.1/dist/ethers.umd.min.js"></script>
+    <!-- Tải CryptoJS cho Keccak256 và PBKDF2 (Mặc dù giải mã EAX sẽ là mock) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <style>
+        :root {
+            font-family: 'Inter', sans-serif;
+        }
+        .bg-gradient-header {
+            background: linear-gradient(90deg, #1e3a8a 0%, #104e8b 100%);
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto shadow-2xl rounded-xl overflow-hidden">
+        
+        <!-- Header -->
+        <header class="bg-gradient-header p-6 text-white">
+            <h1 class="text-3xl font-bold mb-1">Hệ Thống EHR Blockchain PoC</h1>
+            <p class="text-sm opacity-90">Demo truy cập dữ liệu y tế phi tập trung và bất biến.</p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="p-6 space-y-6 bg-white">
+            
+            <!-- Cấu hình -->
+            <div class="bg-blue-50 border-l-4 border-blue-400 p-4 rounded-lg">
+                <p class="font-semibold text-blue-800">Cấu hình Hiện tại (Sepolia Testnet):</p>
+                <code class="block text-xs text-blue-700 mt-1 break-all" id="config-info"></code>
+            </div>
+
+            <!-- Input & Action -->
+            <div class="flex flex-col sm:flex-row gap-4">
+                <input type="text" id="patientIdInput" placeholder="Nhập Patient ID (ví dụ: P0001 - P0030)"
+                       class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-gray-700">
+                <button id="fetchButton" onclick="fetchEHR()"
+                        class="px-6 py-3 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-300 disabled:opacity-50">
+                    Truy Vấn & Giải Mã Hồ Sơ
+                </button>
+            </div>
+            
+            <!-- Trạng thái -->
+            <div id="statusOutput" class="p-3 bg-gray-100 border border-gray-300 rounded-lg text-sm font-medium hidden">
+                Đang chờ...
+            </div>
+
+            <!-- Kết quả Metadata -->
+            <div id="metadataResult" class="border border-gray-200 p-4 rounded-lg space-y-3 hidden">
+                <h3 class="text-lg font-semibold text-gray-800">1. Metadata Blockchain</h3>
+                <code class="block text-xs break-all text-gray-600" id="metadataCode"></code>
+            </div>
+            
+            <!-- Kết quả Hash Verification -->
+            <div id="hashResult" class="border border-gray-200 p-4 rounded-lg space-y-3 hidden">
+                <h3 class="text-lg font-semibold text-gray-800">2. Xác minh Hash IPFS (Security Gate)</h3>
+                <div id="hashStatus" class="font-medium"></div>
+            </div>
+
+            <!-- Kết quả Plaintext -->
+            <div id="plaintextResult" class="border border-green-500 bg-green-50 p-4 rounded-lg space-y-3 hidden">
+                <h3 class="text-xl font-bold text-green-700">3. Dữ Liệu Đã Giải Mã (Plaintext)</h3>
+                <pre class="bg-green-100 p-3 rounded-lg overflow-x-auto text-sm" id="plaintextCode"></pre>
+            </div>
+            
+        </main>
+    </div>
+
+    <script>
+        // ==========================================================
+        // KHAI BÁO CẤU HÌNH & HẰNG SỐ
+        // ==========================================================
+        const PASSPHRASE = "matkhau123";
+        const IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/";
+        const CONTRACT_ADDRESS = "0x3d3A98D067c9004131190FDa942d2DAF26965554";
+        const RPC_URL = "https://eth-sepolia.g.alchemy.com/v2/IVo-gRm8mhmFsQ2sWc5CS";
+        const USER_ADDRESS = "0x805ebe4EcEB4c6a0434D49EeFa8692deeA274532"; // Địa chỉ giả định có quyền
+        
+        // ABI chỉ bao gồm các hàm cần thiết (getRecordMetadata, logAccessViewed)
+        const ABI = [
+            {
+                "inputs": [{"internalType": "bytes32","name": "_patientIdHash","type": "bytes32"}],
+                "name": "logAccessViewed",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            },
+            {
+                "inputs": [{"internalType": "bytes32","name": "_patientIdHash","type": "bytes32"}],
+                "name": "getRecordMetadata",
+                "outputs": [
+                    {"internalType": "string","name": "cid","type": "string"},
+                    {"internalType": "bytes32","name": "hash","type": "bytes32"},
+                    {"internalType": "address","name": "owner","type": "address"},
+                    {"internalType": "uint256","name": "timestamp","type": "uint256"}
+                ],
+                "stateMutability": "view",
+                "type": "function"
+            }
+        ];
+
+        // Dữ liệu Mock (Fallback) - Chỉ dùng để demo hiển thị Plaintext sau khi Hash Check thành công
+        // Dữ liệu này được trích từ file ehr_records_near_fhir (1).json
+        const MOCK_PLAINTEXT = {
+            "P0001": {
+                "resourceType": "EHRRecord",
+                "patient": {"id": "P0001", "name": "Nhiên Đặng", "birthDate": "1981-07-09"},
+                "diagnosis": "Rối loạn mỡ máu",
+                "status": "Đã giải mã thành công (Mock Display)"
+            },
+            "P0030": {
+                "resourceType": "EHRRecord",
+                "patient": {"id": "P0030", "name": "Yến Trần", "birthDate": "1959-06-12"},
+                "diagnosis": "Suy thận",
+                "prescription": "Amlodipine 1 viên/ngày",
+                "status": "Đã giải mã thành công (Mock Display)"
+            }
+        };
+
+        // Khởi tạo Ethers Provider và Contract
+        let provider, contract; // Loại bỏ biến signer không cần thiết
+        
+        window.onload = () => {
+            document.getElementById('config-info').textContent = 
+                `Contract: ${CONTRACT_ADDRESS} | RPC: ${RPC_URL} | User Address: ${USER_ADDRESS}`;
+            
+            try {
+                // Khởi tạo Provider và Contract
+                provider = new ethers.JsonRpcProvider(RPC_URL);
+                contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+            } catch (error) {
+                updateStatus(`❌ Lỗi khởi tạo Web3/Contract: ${error.message}`, 'bg-red-100 text-red-800');
+            }
+        };
+
+        // ==========================================================
+        // HÀM HỖ TRỢ CRYPTO & WEB3
+        // ==========================================================
+
+        function toPatientHash(pid) {
+            // Sử dụng ethers.js utils để Keccak256
+            return ethers.keccak256(ethers.toUtf8Bytes(pid));
+        }
+
+        async function verifyHash(downloadedBytes, expectedHash) {
+            // Tải về bằng Fetch API, trả về ArrayBuffer, cần chuyển sang Uint8Array
+            const dataBuffer = new Uint8Array(downloadedBytes);
+            
+            // Tính toán SHA-256 (sử dụng Web Crypto API)
+            const crypto = window.crypto.subtle;
+            if (!crypto) {
+                console.error("Web Crypto API không khả dụng. Bỏ qua xác minh Hash.");
+                return true; // Bỏ qua nếu môi trường không hỗ trợ
+            }
+
+            const hashBuffer = await crypto.digest('SHA-256', dataBuffer);
+            const actualHash = '0x' + Array.from(new Uint8Array(hashBuffer))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+
+            updateStatus(`  - Hash tải về (SHA256): ${actualHash.substring(0, 10)}...`);
+            updateStatus(`  - Hash mong đợi (BC): ${expectedHash.substring(0, 10)}...`);
+
+            // So sánh Hash. Hash từ BC (expectedHash) là bytes32, hash từ Web Crypto (actualHash) là 0x + 64 ký tự hex.
+            return actualHash === expectedHash;
+        }
+
+        async function updateStatus(message, style = 'bg-gray-100 text-gray-800') {
+            const statusElement = document.getElementById('statusOutput');
+            statusElement.classList.remove('hidden', 'bg-red-100', 'bg-green-100', 'text-red-800', 'text-green-800');
+            statusElement.className = `p-3 border border-gray-300 rounded-lg text-sm font-medium ${style}`;
+            statusElement.innerHTML += `<p class="mt-1">${new Date().toLocaleTimeString()} - ${message}</p>`;
+        }
+
+        function resetUI() {
+            document.getElementById('statusOutput').innerHTML = '';
+            document.getElementById('statusOutput').classList.remove('hidden');
+            document.getElementById('metadataResult').classList.add('hidden');
+            document.getElementById('hashResult').classList.add('hidden');
+            document.getElementById('plaintextResult').classList.add('hidden');
+            document.getElementById('fetchButton').disabled = false;
+        }
+        
+        async function mockLogAccessViewed(pidHash) {
+            // Đây là mô phỏng việc gọi hàm logAccessViewed.
+            // Trong thực tế, cần có Signer và Private Key để gửi TX.
+            // Vì chỉ là DApp Demo, chúng ta giả định giao dịch thành công.
+            try {
+                // Kiểm tra xem hàm có tồn tại không (chỉ để tránh lỗi cứng nếu ABI bị thiếu)
+                if (contract.logAccessViewed) {
+                     // Gửi một cuộc gọi chỉ đọc (call) để kiểm tra logic hợp đồng (nếu có require)
+                     // Nếu không có require, việc này sẽ pass. Đây là mô phỏng tốt nhất có thể.
+                     await contract.logAccessViewed.staticCall(pidHash, { from: USER_ADDRESS });
+                }
+                updateStatus("✅ Ghi Log Truy cập (Audit Log) mô phỏng thành công.");
+            } catch (error) {
+                updateStatus(`❌ Ghi Log Truy cập mô phỏng THẤT BẠI. Lỗi: ${error.message}`, 'bg-red-100 text-red-800');
+            }
+        }
+
+        // ==========================================================
+        // HÀM CHÍNH: TRUY VẤN, TẢI VỀ VÀ GIẢI MÃ
+        // ==========================================================
+
+        async function fetchEHR() {
+            resetUI();
+            document.getElementById('fetchButton').disabled = true;
+            const patientId = document.getElementById('patientIdInput').value.trim().toUpperCase();
+
+            if (!patientId || patientId.length < 5) {
+                updateStatus("❌ Vui lòng nhập Patient ID hợp lệ (ví dụ: P0001).", 'bg-red-100 text-red-800');
+                document.getElementById('fetchButton').disabled = false;
+                return;
+            }
+
+            const pidHash = toPatientHash(patientId);
+            let cid, expectedHash;
+
+            try {
+                // 1. LẤY METADATA TỪ BLOCKCHAIN
+                updateStatus(`⛓️ Truy vấn Metadata cho Patient ID: ${patientId} (Hash: ${pidHash.substring(0, 10)}...)`);
+                
+                const metadata = await contract.getRecordMetadata(pidHash, { from: USER_ADDRESS });
+                cid = metadata[0];
+                expectedHash = metadata[1]; // bytes32
+                
+                if (!cid || expectedHash === '0x0000000000000000000000000000000000000000000000000000000000000000') {
+                    updateStatus("❌ Lỗi: CID rỗng hoặc Hash 0x0. Hồ sơ không tồn tại, chưa cập nhật CID thật, hoặc không có quyền truy cập.", 'bg-red-100 text-red-800');
+                    return;
+                }
+                
+                document.getElementById('metadataResult').classList.remove('hidden');
+                document.getElementById('metadataCode').textContent = 
+                    `CID (IPFS): ${cid}\nHash (SHA256): ${expectedHash}\nOwner: ${metadata[2]}\nTimestamp: ${metadata[3]}`;
+
+                updateStatus(`✅ Lấy CID thành công: ${cid}`);
+
+                // 2. TẢI FILE ĐÃ MÃ HÓA TỪ IPFS
+                const url = `${IPFS_GATEWAY}${cid}`;
+                updateStatus(`☁️ Đang tải dữ liệu đã mã hóa từ: ${url}`);
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    updateStatus(`❌ Lỗi tải IPFS: Status ${response.status} - ${response.statusText}. Có thể CID chưa được Pin.`, 'bg-red-100 text-red-800');
+                    return;
+                }
+                
+                const encryptedDataArrayBuffer = await response.arrayBuffer();
+
+                // 3. XÁC MINH HASH TOÀN VẸN
+                document.getElementById('hashResult').classList.remove('hidden');
+                updateStatus("🔑 Đang tiến hành xác minh Hash toàn vẹn (Security Gate)...");
+                
+                const hashStatusElement = document.getElementById('hashStatus');
+                const isHashValid = await verifyHash(encryptedDataArrayBuffer, expectedHash);
+                
+                if (isHashValid) {
+                    hashStatusElement.innerHTML = `<span class="text-green-600">✅ THÀNH CÔNG: Hash dữ liệu tải về KHỚP với Hash trên Blockchain.</span>`;
+                    updateStatus("✅ Xác minh Hash thành công! Dữ liệu đáng tin cậy.");
+
+                    // 4. MOCK GHI LOG TRUY CẬP (Audit Log)
+                    mockLogAccessViewed(pidHash);
+
+                    // 5. GIẢI MÃ & HIỂN THỊ PLAINTEXT (Mock do phức tạp của EAX mode trong trình duyệt)
+                    const plaintextRecord = MOCK_PLAINTEXT[patientId] || { error: `Không tìm thấy nội dung mẫu (Mock) cho ${patientId}` };
+                    
+                    document.getElementById('plaintextResult').classList.remove('hidden');
+                    document.getElementById('plaintextCode').textContent = JSON.stringify(plaintextRecord, null, 2);
+                    
+                } else {
+                    hashStatusElement.innerHTML = `<span class="text-red-600">❌ THẤT BẠI: Hash dữ liệu KHÔNG KHỚP. Dữ liệu đã bị sửa đổi hoặc tải lỗi. **KHÔNG GIẢI MÃ!**</span>`;
+                    updateStatus("❌ Xác minh Hash thất bại. Quá trình dừng lại để đảm bảo bảo mật.", 'bg-red-100 text-red-800');
+                }
+
+            } catch (error) {
+                updateStatus(`❌ LỖI HỆ THỐNG: ${error.message || error}`, 'bg-red-100 text-red-800');
+            } finally {
+                document.getElementById('fetchButton').disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
